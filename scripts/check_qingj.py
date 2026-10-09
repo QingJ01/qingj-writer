@@ -10,8 +10,9 @@
     python scripts/check_qingj.py 稿件.md --mode F --minutes 10   公众号文章改视频脚本
     cat 稿件.md | python scripts/check_qingj.py -
 
-模式E/F会跳过【屏幕】这类制作备注、引用行，以及标题含屏上呈现总则、拍摄建议、
-核验清单、发布包、取舍清单、改编核对、质检报告、分镜的整节，整份交付稿可以直接检查。
+所有模式都跳过标题含质检报告、改动说明的整节。模式E/F另外跳过【屏幕】这类制作备注、
+引用行，以及标题含屏上呈现总则、拍摄建议、核验清单、发布包、取舍清单、改编核对、分镜的整节，
+整份交付稿可以直接检查。
 
 退出码 0 表示无硬性失败，1 表示有失败项，2 表示读取出错。
 
@@ -31,10 +32,15 @@ from pathlib import Path
 
 BANNED_PHRASES = (
     "说白了", "说穿了", "先说结论",
-    "意味着什么", "这意味着", "本质上", "换句话说", "不可否认",
+    "这意味着", "对你意味着什么", "本质上", "换句话说", "不可否认",
     "综上所述", "总的来说", "归根结底",
     "值得注意的是", "不难发现",
     "让我们来看看", "接下来让我们", "让我们拭目以待",
+)
+
+# "意味着什么？"自问自答才禁，"电力到底意味着什么的那波人"是正常用法
+BANNED_PATTERNS = (
+    re.compile(r"意味着什么(?=\s*(?:[？?]|$))", re.M),
 )
 
 # 洞察路标只在句首给段落抬价时判失败，"楼上还有一层"这类本义不算
@@ -79,9 +85,14 @@ VAGUE_ATTRIBUTION = (
     "业内人士", "观察者指出", "有分析认为", "多个来源", "据报道",
 )
 
+# 同一小句里前面写明了谁的研究、哪家的数据，就不算模糊归因
+SOURCED_ATTRIBUTION = ("研究表明", "数据显示")
+NAMED_SOURCE = re.compile(r"[A-Za-z《]|大学|学院|研究院|研究所|实验室|统计局|"
+                          r"[^\s，。！？]{2,}(?:部|委|署|局|公司|团队|官方|官网)|财报|白皮书")
+
 SELF_MEDIA_SLOP = (
     "保姆级", "一文读懂", "干货满满", "绝绝子", "家人们", "宝子们",
-    "谁懂啊", "狠狠", "封神", "yyds",
+    "谁懂啊", "狠狠拿捏", "狠狠爱", "封神", "yyds",
 )
 
 # 只提醒，不判失败。写具体事物时是好词，给抽象概念穿衣服时才是问题
@@ -132,10 +143,12 @@ CONJUNCTIONS = (
 COLLOQUIAL = (
     "坦率的讲", "说真的", "我是真的觉得", "反正我觉得", "怎么说呢",
     "其实吧", "你想想看", "回到", "顺着上面", "写着写着突然想到",
-    "我有时候觉得", "我一直觉得", "我自己的感受是", "说实话我也不确定",
-    "我自己也还在摸索", "这个事儿我也踩过坑", "这种感觉太爽了",
+    "我有时候觉得", "我一直觉得", "我更在意的是", "我自己的感受是",
+    "我觉得还是挺重要的", "说实话我也不确定", "我自己也还在摸索",
+    "可能有些想法还不成熟", "这个事儿我也踩过坑", "这种感觉太爽了",
     "我当时就愣住了", "想想就觉得兴奋", "太离谱了", "给我整不会了",
-    "你敢信", "救命", "很多朋友可能不知道", "大家也都知道", "可能有小伙伴",
+    "你敢信", "救命", "很多朋友可能不知道", "你如果关注这个领域的话",
+    "大家也都知道", "可能有小伙伴",
 )
 
 NOMINALIZATION = (
@@ -177,13 +190,16 @@ FIXED_TAIL_MARKERS = ("谢谢你看我的文章", "点个赞", "在看", "转发
                       "作者：情酱", "投稿或交流", "让更多人看到", "评论区见",
                       "一键三连", "我是情酱，陪你在AI时代")
 
+# 标题含这些词的整节是交给作者看的说明，所有模式都不按正文查
+REPORT_SECTIONS = ("质检报告", "改动说明")
+
 # ---------------------------------------------------------------- 视频脚本（模式E/F）
 
 # 标题含这些词的整节是给制作和发布看的，不念出来
 VIDEO_APPENDIX = ("屏上呈现总则", "拍摄建议", "核验清单", "事实核验", "发布包",
-                  "取舍清单", "改编取舍", "改编核对", "质检报告", "分镜")
+                  "取舍清单", "改编取舍", "改编核对", "分镜")
 
-# 【屏幕】【纯口播】【出处】这类独立成行的制作备注
+# 【屏幕】【纯口播】【出处】【验收】这类独立成行的制作备注
 CUE_LINE = re.compile(r"^\s*【[^】\n]{1,8}】")
 SCREEN_CUE = re.compile(r"^\s*【(?:屏幕|纯口播)】", re.M)
 
@@ -257,6 +273,11 @@ def find_terms(text: str, terms: tuple) -> list:
     return sorted(hits)
 
 
+def has_named_source(text: str, position: int) -> bool:
+    clause_start = max(text.rfind(mark, 0, position) for mark in "，。！？；\n") + 1
+    return bool(NAMED_SOURCE.search(text[clause_start:position]))
+
+
 def find_patterns(text: str, patterns: tuple) -> list:
     out, occupied = [], []
     for pattern in patterns:
@@ -284,8 +305,9 @@ def mask_fixed_tail(text: str) -> str:
     return "\n".join(out)
 
 
-def mask_video_extras(text: str) -> str:
-    """模式E/F只留口播。屏蔽制作备注、引用行和附录整节，保留字符位置与换行。"""
+def mask_sections(text: str, keys: tuple, video: bool = False) -> str:
+    """屏蔽标题含 keys 的整节，到同级或更高级标题为止，保留字符位置与换行。
+    video 为真时连同制作备注和引用行一起屏蔽，模式E/F只留口播。"""
     out, skip_level = [], None
     for raw in text.split("\n"):
         heading = re.match(r"^\s*(#{1,6})\s+(.*)", raw)
@@ -293,12 +315,10 @@ def mask_video_extras(text: str) -> str:
             level, title = len(heading.group(1)), heading.group(2)
             if skip_level is not None and level <= skip_level:
                 skip_level = None
-            if skip_level is None and any(key in title for key in VIDEO_APPENDIX):
+            if skip_level is None and any(key in title for key in keys):
                 skip_level = level
-        if skip_level is not None or CUE_LINE.match(raw) or raw.strip().startswith(">"):
-            out.append(" " * len(raw))
-        else:
-            out.append(raw)
+        cue = video and (CUE_LINE.match(raw) or raw.strip().startswith(">"))
+        out.append(" " * len(raw) if skip_level is not None or cue else raw)
     return "\n".join(out)
 
 
@@ -410,8 +430,8 @@ def main() -> int:
         return 2
 
     prose = mask_non_prose(text)
-    if video:
-        prose = mask_video_extras(prose)
+    prose = mask_sections(prose, REPORT_SECTIONS + VIDEO_APPENDIX if video else REPORT_SECTIONS,
+                          video=video)
     total = han_count(prose)
     if total == 0:
         print("没有检测到汉字。" + ("模式E/F只统计口播，检查一下口播是不是都被写成了备注或附录。"
@@ -455,6 +475,7 @@ def main() -> int:
                 fails.append(f"段末句号，第 {index} 行，{excerpt(line[-18:])}")
 
     # ---- 词表禁令
+    banned_spans = []
     for label, table in (("套话/AI味词", BANNED_PHRASES),
                          ("商业黑话", BUSINESS_JARGON),
                          ("夸大意义", INFLATED_MEANING),
@@ -462,7 +483,15 @@ def main() -> int:
                          ("模糊归因", VAGUE_ATTRIBUTION),
                          ("自媒体腔", SELF_MEDIA_SLOP)):
         for position, term in find_terms(prose, table):
+            if term in SOURCED_ATTRIBUTION and has_named_source(prose, position):
+                continue
+            banned_spans.append((position, position + len(term)))
             fail(label, position, term)
+
+    for match in find_patterns(prose, BANNED_PATTERNS):
+        if any(match.start() < e and match.end() > s for s, e in banned_spans):
+            continue
+        fail("套话/AI味词", match.start(), match.group())
 
     for match in find_patterns(prose, ROAD_SIGN_PATTERNS):
         fail("洞察路标", match.start(), f"“{excerpt(match.group().lstrip('。！？!? \n'))}”")
@@ -639,14 +668,15 @@ def main() -> int:
             warns.append(f"段落开场重复，从第 {first} 行附近开始，{details}。")
 
     # ---- 模式专属格式
+    authored = mask_sections(text, REPORT_SECTIONS)
     if mode == "A":
-        for index, raw in enumerate(text.split("\n"), start=1):
+        for index, raw in enumerate(authored.split("\n"), start=1):
             if re.match(r"^#{2,6}\s", raw.strip()):
                 warns.append(f"第 {index} 行出现小标题。模式A靠口语化转场衔接，"
                              "分条目方法论文章除外。")
                 break
         bullets = 0
-        for raw in text.split("\n"):
+        for raw in authored.split("\n"):
             if re.match(r"^\s*(?:[-+*]|\d+[.、])\s", raw):
                 bullets += 1
                 if bullets > 3:
@@ -655,7 +685,7 @@ def main() -> int:
             elif raw.strip():
                 bullets = 0
 
-    for match in re.finditer(r"\*\*([^*\n]{40,})\*\*", text):
+    for match in re.finditer(r"\*\*([^*\n]{40,})\*\*", authored):
         warns.append(f"第 {line_number(text, match.start())} 行有超长加粗"
                      f"（{len(match.group(1))} 字）。超过 2 行的加粗几乎肯定是过度结构化。")
         break
