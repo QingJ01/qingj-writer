@@ -5,7 +5,7 @@
     python scripts/check_qingj.py 稿件.md              默认按模式A检查
     python scripts/check_qingj.py 稿件.md --mode B     知乎问答
     python scripts/check_qingj.py 稿件.md --mode C     推特/小红书
-    python scripts/check_qingj.py 稿件.md --mode D     改稿（只查AI痕迹，不查情酱风格规则）
+    python scripts/check_qingj.py 稿件.md --mode D     改稿（只报候选，不判失败，不查情酱风格规则）
     cat 稿件.md | python scripts/check_qingj.py -
 
 退出码 0 表示无硬性失败，1 表示有失败项，2 表示读取出错。
@@ -285,6 +285,13 @@ def main() -> int:
 
     def fail(label: str, position: int, sample: str = "") -> None:
         tail = f"，{sample}" if sample else ""
+        if mode == "D":
+            # 改稿时同一个词可能是术语、引文或真实论证，按作用判断，不按命中改
+            advice = ("默认连同归属保留论断，正文后注明缺来源，不能只删归属。"
+                      if label == "模糊归因" else
+                      "看它在句子里承担什么作用再决定改不改。")
+            warns.append(f"候选 {label}，第 {line_number(text, position)} 行{tail}。{advice}")
+            return
         fails.append(f"{label}，第 {line_number(text, position)} 行{tail}")
 
     # ---- 标点禁令。模式D不查，改稿保留作者自己的标点习惯
@@ -322,6 +329,11 @@ def main() -> int:
     # ---- 翻案腔
     hard_pivots = find_patterns(prose, PIVOT_HARD)
     for match in hard_pivots:
+        if mode == "D":
+            warns.append(f"候选 翻案腔，第 {line_number(text, match.start())} 行，"
+                         f"“{excerpt(match.group())}”。真实对比和论证骨架保留，"
+                         "只清没有信息的那半句。")
+            continue
         fail("翻案腔", match.start(), f"“{excerpt(match.group())}”")
 
     occupied = [m.span() for m in hard_pivots]
@@ -350,8 +362,12 @@ def main() -> int:
             f"“{excerpt(match.group(), 34)}”。还原成直接的动词。"
         )
 
+    # 句长、连词、口语、段落这些阈值只适用于情酱自己的叙事文本。
+    # 改稿时作者原有节奏不归脚本管，文档类文本的连词密度天然偏高
+    style = mode != "D"
+
     conj = find_terms(prose, CONJUNCTIONS)
-    if total >= 600 and len(conj) * 1000 / total > 7:
+    if style and total >= 600 and len(conj) * 1000 / total > 7:
         top = "、".join(f"{t} {c} 次" for t, c in
                         collections.Counter(t for _, t in conj).most_common(4))
         warns.append(
@@ -360,7 +376,7 @@ def main() -> int:
         )
 
     cv = sentence_cv(prose)
-    if cv and cv[0] < 0.42:
+    if style and cv and cv[0] < 0.42:
         warns.append(
             f"全文 {cv[1]} 个句子长度过于接近（变异系数 {cv[0]:.2f}）。"
             "人写的段落里十个字的句子会挨着四十个字的句子，放开几句，压短几句。"
@@ -373,13 +389,13 @@ def main() -> int:
                      "写具体事物时保留，给抽象概念穿衣服时删掉。")
 
     fake = find_terms(prose, FAKE_DETAIL)
-    if fake:
+    if fake and style:
         samples = "、".join(dict.fromkeys(t for _, t in fake))
         warns.append(f"疑似假细节或论坛服装 {len(fake)} 处。{samples}。"
                      "没有来源、也不改变后文的细节，删掉。")
 
     big = [t for _, t in find_terms(prose, BIG_WORDS)]
-    if big and total >= 800:
+    if style and big and total >= 800:
         tail_zone = prose[int(len(prose) * 0.85):]
         tail_big = [w for w in BIG_WORDS if w in tail_zone]
         if tail_big:
@@ -389,7 +405,7 @@ def main() -> int:
     # ---- 情酱专属：硬凹检测
     colloquial = find_terms(prose, COLLOQUIAL)
     distinct = len(set(t for _, t in colloquial))
-    if total >= 500:
+    if style and total >= 500:
         density = len(colloquial) * 1000 / total
         if density > 16:
             warns.append(
@@ -402,13 +418,13 @@ def main() -> int:
             warns.append(f"不同口语词组只有 {distinct} 种，模式B建议 5 种以上。")
 
     emotion_marks = len(re.findall(r"。。。|？？？", prose))
-    if total >= 500 and emotion_marks * 1000 / total > 5:
+    if style and total >= 500 and emotion_marks * 1000 / total > 5:
         warns.append(f"情绪标点 {emotion_marks} 处，密度偏高。"
                      "它要来自对眼前材料的真实反应，不能按固定间隔投放。")
 
     # ---- 段落形状
     lines = prose_lines(prose)
-    if len(lines) >= 10:
+    if style and len(lines) >= 10:
         single = sum(1 for _, _, l in lines if len(re.findall(r"[。！？!?]", l)) <= 1)
         ratio = single / len(lines)
         if ratio >= 0.8:
