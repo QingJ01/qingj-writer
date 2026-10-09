@@ -28,17 +28,32 @@ BANNED_PHRASES = (
     "说白了", "说穿了", "先说结论",
     "意味着什么", "这意味着", "本质上", "换句话说", "不可否认",
     "综上所述", "总的来说", "归根结底",
-    "值得注意的是", "需要指出的是", "不难发现",
+    "值得注意的是", "不难发现",
     "让我们来看看", "接下来让我们", "让我们拭目以待",
-    "从某种意义上说", "更微妙的是", "还有一层", "只说对了一半",
 )
 
+# 洞察路标只在句首给段落抬价时判失败，"楼上还有一层"这类本义不算
+ROAD_SIGN_PATTERNS = (
+    re.compile(r"(?:^|[。！？!?]\s*)更微妙的是[^。！？!?\n]{0,24}", re.MULTILINE),
+    re.compile(r"(?:^|[。！？!?]\s*)还有一层(?=(?:更|原因|问题|意思|考虑|变化|逻辑|价值|"
+               r"作用|风险|影响|值得|很少|不容易|常被|往往))[^。！？!?\n]{0,24}", re.MULTILINE),
+    *(re.compile(rf"(?:^|[。！？!?]\s*){phrase}[^。！？!?\n]{{0,24}}", re.MULTILINE)
+      for phrase in ("只说对了一半", "需要指出的是", "从某种意义上说")),
+)
+
+# 与 references/human_writing_craft.md 第十一节的绝对禁词保持一致
 BUSINESS_JARGON = (
     "赋能", "抓手", "商业闭环", "价值闭环", "能力沉淀", "拉通",
     "底层逻辑", "顶层设计", "认知跃迁", "价值释放", "能力建设",
     "降本增效", "内容矩阵", "全链路", "组合拳", "打开想象空间",
-    "结构性机会", "关键命题", "深层逻辑", "技术底座", "认知增量",
-    "迭代闭环", "颗粒度",
+    "结构性机会", "关键命题", "深层逻辑", "技术底座", "公共底座",
+    "技术主权", "单点风险", "主脊柱", "材料锚点", "认知增量", "迭代闭环",
+)
+
+# 语境判断词，本义时保留，给普通事情抬价时改写。只提醒
+CONTEXT_JARGON = (
+    "沉淀", "颗粒度", "对齐", "协同", "链路", "生态位", "心智",
+    "范式", "方法论", "核心变量", "打法", "想象空间", "闭环",
 )
 
 INFLATED_MEANING = (
@@ -67,7 +82,33 @@ SELF_MEDIA_SLOP = (
 # 只提醒，不判失败。写具体事物时是好词，给抽象概念穿衣服时才是问题
 LYRIC_WORDS = (
     "安放", "抵达", "微光", "褶皱", "丰盈", "滚烫",
-    "轻盈", "赤裸", "剥开", "锋利", "坍塌", "浪潮",
+    "轻盈", "赤裸", "剥开", "锋利", "坚硬", "柔软", "坍塌", "浪潮",
+)
+
+# 短距离混用三套以上借喻系统时提醒，先全部还原成本义
+METAPHOR_FIELDS = {
+    "温度": ("降温", "升温", "冷却", "余温", "温度最高"),
+    "生死战争": ("杀死", "死因", "枪响", "开火", "战场", "引爆", "弹药"),
+    "建筑灾害": ("坍塌", "崩塌", "地基", "砖头", "支柱", "废墟"),
+    "仓储租赁": ("仓库", "库房", "租金", "取货", "入库", "库存"),
+    "道路竞赛": ("赛道", "跑道", "岔路", "十字路口", "终点线", "门票"),
+    "机器器官": ("齿轮", "引擎", "发动机", "血管", "骨架", "肌肉"),
+    "海洋航行": ("蓝海", "浪潮", "潮水", "航船", "灯塔", "彼岸"),
+}
+
+# 情酱已经硬禁的本质上、换句话说等不在这里重复
+SOFT_MARKERS = ("真正", "更深层次", "核心是", "关键在于")
+
+REPEATED_OPENERS = (
+    "其实", "不过", "当然", "所以", "但是", "后来", "当时",
+    "很多人", "问题是", "更重要的是", "说到这里",
+)
+
+# 主干来得太晚的长前置成分
+LEFT_BRANCH = (
+    re.compile(r"(?:^|[。！？]\s*)在[^，。！？\n]{12,70}(?:以后|之后|之前|以前|过程中|情况下|背景下)，", re.M),
+    re.compile(r"(?:^|[。！？]\s*)那些[^，。！？\n]{10,60}的[^，。！？\n]{2,30}[，。]", re.M),
+    re.compile(r"(?:^|[。！？]\s*)(?:真正|最终|最后)让[^，。！？\n]{8,70}的，是", re.M),
 )
 
 # 无来源就是假细节，越具体AI味越重
@@ -258,6 +299,29 @@ def prose_lines(text: str) -> list:
     return out
 
 
+def metaphor_cluster(text: str, distance: int = 800):
+    hits = sorted(
+        (m.start(), field, word)
+        for field, words in METAPHOR_FIELDS.items()
+        for word in words
+        for m in re.finditer(re.escape(word), text)
+    )
+    for index, (start, _, _) in enumerate(hits):
+        window = [hit for hit in hits[index:] if hit[0] - start <= distance]
+        fields = {hit[1] for hit in window}
+        if len(fields) >= 3:
+            return window, fields
+    return None
+
+
+def heavy_de_sentences(text: str) -> list:
+    """主干可能被四个以上"的"压到后面的长句。"""
+    return [
+        m for m in re.finditer(r"[^。！？!?\n]+(?:[。！？!?]|$)", text)
+        if han_count(m.group()) >= 38 and m.group().count("的") >= 4
+    ]
+
+
 # ---------------------------------------------------------------- 主检查
 
 def main() -> int:
@@ -325,6 +389,20 @@ def main() -> int:
                          ("自媒体腔", SELF_MEDIA_SLOP)):
         for position, term in find_terms(prose, table):
             fail(label, position, term)
+
+    for match in find_patterns(prose, ROAD_SIGN_PATTERNS):
+        fail("洞察路标", match.start(), f"“{excerpt(match.group().lstrip('。！？!? \n'))}”")
+
+    hard_spans = [(p, p + len(t)) for p, t in find_terms(prose, BUSINESS_JARGON)]
+    context = [
+        (p, t) for p, t in find_terms(prose, CONTEXT_JARGON)
+        if not any(p < e and p + len(t) > s for s, e in hard_spans)
+    ]
+    if context:
+        samples = "、".join(dict.fromkeys(t for _, t in context))
+        lines_hit = "、".join(dict.fromkeys(str(line_number(text, p)) for p, _ in context[:8]))
+        warns.append(f"语境判断词 {len(context)} 处，第 {lines_hit} 行，{samples}。"
+                     "本义准确时保留（闭环控制、排版对齐），给普通事情抬价时改写。")
 
     # ---- 翻案腔
     hard_pivots = find_patterns(prose, PIVOT_HARD)
@@ -402,6 +480,34 @@ def main() -> int:
             warns.append(f"结尾出现大词 {'、'.join(dict.fromkeys(tail_big))}。"
                          "正文没有持续处理这个尺度，就回到具体事实或当前判断。")
 
+    metaphors = metaphor_cluster(prose)
+    if metaphors:
+        window, fields = metaphors
+        samples = "、".join(dict.fromkeys(hit[2] for hit in window))
+        warns.append(f"八百字内混用 {len(fields)} 套借喻，{'、'.join(sorted(fields))}，"
+                     f"例词 {samples}。先全部还原成本义，意思清楚了一个也不用放回。")
+
+    # ---- 中文词序与洞察路标密度
+    if style:
+        markers = find_terms(prose, SOFT_MARKERS)
+        marker_limit = max(2, total // 900)
+        if len(markers) > marker_limit:
+            samples = "、".join(dict.fromkeys(t for _, t in markers))
+            warns.append(f"洞察路标 {len(markers)} 处，提醒线 {marker_limit} 处，{samples}。"
+                         "检查是不是在给普通判断抬价。")
+
+        left = find_patterns(prose, LEFT_BRANCH)
+        if len(left) > max(2, total // 1200):
+            samples = "；".join(f"第 {line_number(text, m.start())} 行“{excerpt(m.group(), 30)}”"
+                               for m in left[:3])
+            warns.append(f"长前置成分 {len(left)} 处，主干可能来得太晚。{samples}")
+
+        dense = heavy_de_sentences(prose)
+        if len(dense) > max(1, total // 1500):
+            samples = "；".join(f"第 {line_number(text, m.start())} 行“{excerpt(m.group(), 30)}”"
+                               for m in dense[:3])
+            warns.append(f"{len(dense)} 个长句带四个以上“的”，先交代人和动作。{samples}")
+
     # ---- 情酱专属：硬凹检测
     colloquial = find_terms(prose, COLLOQUIAL)
     distinct = len(set(t for _, t in colloquial))
@@ -441,6 +547,21 @@ def main() -> int:
                     break
             else:
                 streak = 0
+
+        openers = collections.Counter()
+        first_seen = {}
+        for index, _, line in lines:
+            value = line.lstrip("“‘\"（(*")
+            for opener in REPEATED_OPENERS:
+                if value.startswith(opener):
+                    openers[opener] += 1
+                    first_seen.setdefault(opener, index)
+                    break
+        repeated = [(o, c) for o, c in openers.items() if c >= 4]
+        if repeated:
+            details = "、".join(f"{o} {c} 次" for o, c in repeated)
+            first = min(first_seen[o] for o, _ in repeated)
+            warns.append(f"段落开场重复，从第 {first} 行附近开始，{details}。")
 
     # ---- 模式专属格式
     if mode == "A":
