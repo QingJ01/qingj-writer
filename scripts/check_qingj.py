@@ -6,7 +6,12 @@
     python scripts/check_qingj.py 稿件.md --mode B     知乎问答
     python scripts/check_qingj.py 稿件.md --mode C     推特/小红书
     python scripts/check_qingj.py 稿件.md --mode D     改稿（只报候选，不判失败，不查情酱风格规则）
+    python scripts/check_qingj.py 稿件.md --mode E --minutes 10   B站视频脚本，只查口播
+    python scripts/check_qingj.py 稿件.md --mode F --minutes 10   公众号文章改视频脚本
     cat 稿件.md | python scripts/check_qingj.py -
+
+模式E/F会跳过【屏幕】这类制作备注、引用行，以及标题含屏上呈现总则、拍摄建议、
+核验清单、发布包、取舍清单、改编核对、质检报告、分镜的整节，整份交付稿可以直接检查。
 
 退出码 0 表示无硬性失败，1 表示有失败项，2 表示读取出错。
 
@@ -115,6 +120,7 @@ LEFT_BRANCH = (
 FAKE_DETAIL = (
     "凌晨三点", "凌晨两点", "第三根烟", "冷咖啡", "窗外的雨",
     "烟头", "冷馒头", "深夜的屏幕", "泡杯茶", "老铁", "兄弟们", "谢邀",
+    "我有个朋友",
 )
 
 CONJUNCTIONS = (
@@ -168,7 +174,38 @@ PIVOT_SOFT = (
 BIG_WORDS = ("时代", "文明", "未来", "世界", "历史", "奇迹", "所有人", "全人类")
 
 FIXED_TAIL_MARKERS = ("谢谢你看我的文章", "点个赞", "在看", "转发三连", "星标",
-                      "作者：情酱", "投稿或交流", "让更多人看到", "评论区见")
+                      "作者：情酱", "投稿或交流", "让更多人看到", "评论区见",
+                      "一键三连", "我是情酱，陪你在AI时代")
+
+# ---------------------------------------------------------------- 视频脚本（模式E/F）
+
+# 标题含这些词的整节是给制作和发布看的，不念出来
+VIDEO_APPENDIX = ("屏上呈现总则", "拍摄建议", "核验清单", "事实核验", "发布包",
+                  "取舍清单", "改编取舍", "改编核对", "质检报告", "分镜")
+
+# 【屏幕】【纯口播】【出处】这类独立成行的制作备注
+CUE_LINE = re.compile(r"^\s*【[^】\n]{1,8}】")
+SCREEN_CUE = re.compile(r"^\s*【(?:屏幕|纯口播)】", re.M)
+
+# 公众号尾部出现在视频口播里就是没换平台
+WECHAT_LEFTOVER = re.compile(r"在看[、，]|[、，]在看|星标|转发三连|谢谢你看我的文章|"
+                             r"投稿或交流|作者：情酱|阅读原文")
+
+# 阅读才有的指代，念出来观众找不到
+READING_DEIXIS = re.compile(r"如[上下]图|[上下]图(?:所示|中|里)|上文(?:提到|说|讲|里|中)|"
+                            r"前文(?:提到|说|讲)|下文(?:会|将|再)|文末|"
+                            r"本文(?:中|里|讲|会|将|提到)|往下翻")
+
+SPOKEN_SYMBOLS = re.compile(r"[→←↑↓≈≠×&]|(?<=[一-鿿])/|/(?=[一-鿿])")
+SPOKEN_PAREN = re.compile(r"[（(][^）)\n]*[一-鿿][^）)\n]*[）)]")
+TIMESTAMP = re.compile(r"(?<![\d.])\d{1,2}[:：]\d{2}(?![\d.])")
+TIME_PROMISE = re.compile(r"[一二三四五六七八九十两几\d]+分钟(?:内|里)?"
+                          r"(?:讲清楚|讲明白|讲透|带你|看懂|搞懂|学会|上手)")
+
+# 情酱聊天语速，每分钟口播字数
+SPEECH_RATE = 240
+SPEECH_RATE_RANGE = (200, 280)
+LONG_CLAUSE = 26
 
 
 # ---------------------------------------------------------------- 工具
@@ -195,6 +232,7 @@ def mask_non_prose(text: str) -> str:
     patterns = (
         re.compile(r"\A---\s*\n.*?\n---\s*(?:\n|\Z)", re.DOTALL),
         re.compile(r"```.*?```", re.DOTALL),
+        re.compile(r"<!--.*?-->", re.DOTALL),
         re.compile(r"`[^`\n]*`"),
         re.compile(r"\]\([^\n)]*\)"),
         re.compile(r"https?://[^\s)>]+"),
@@ -244,6 +282,32 @@ def mask_fixed_tail(text: str) -> str:
         else:
             out.append(raw)
     return "\n".join(out)
+
+
+def mask_video_extras(text: str) -> str:
+    """模式E/F只留口播。屏蔽制作备注、引用行和附录整节，保留字符位置与换行。"""
+    out, skip_level = [], None
+    for raw in text.split("\n"):
+        heading = re.match(r"^\s*(#{1,6})\s+(.*)", raw)
+        if heading:
+            level, title = len(heading.group(1)), heading.group(2)
+            if skip_level is not None and level <= skip_level:
+                skip_level = None
+            if skip_level is None and any(key in title for key in VIDEO_APPENDIX):
+                skip_level = level
+        if skip_level is not None or CUE_LINE.match(raw) or raw.strip().startswith(">"):
+            out.append(" " * len(raw))
+        else:
+            out.append(raw)
+    return "\n".join(out)
+
+
+def long_clauses(text: str, limit: int = LONG_CLAUSE) -> list:
+    """两个停顿之间字数太多，照着念要憋一口长气。"""
+    return [
+        m for m in re.finditer(r"[^，。！？；、,!?;：:…\n]+", text)
+        if han_count(m.group()) > limit
+    ]
 
 
 def sentence_cv(text: str):
@@ -327,10 +391,17 @@ def heavy_de_sentences(text: str) -> list:
 def main() -> int:
     parser = argparse.ArgumentParser(description="情酱写作skill成稿检查器")
     parser.add_argument("path", help="Markdown 或文本路径，- 表示标准输入")
-    parser.add_argument("--mode", default="A", choices=list("ABCDabcd"),
-                        help="A 公众号长文，B 知乎问答，C 短内容，D 改稿")
+    parser.add_argument("--mode", default="A", choices=list("ABCDEFabcdef"),
+                        help="A 公众号长文，B 知乎问答，C 短内容，D 改稿，"
+                             "E B站视频脚本，F 公众号文章改视频脚本")
+    parser.add_argument("--minutes", type=float, default=None,
+                        help="模式E/F的目标时长（分钟），用来核对口播字数")
     args = parser.parse_args()
     mode = args.mode.upper()
+    video = mode in "EF"
+    if args.minutes is not None and args.minutes <= 0:
+        print("--minutes 需要是正数。", file=sys.stderr)
+        return 2
 
     try:
         text = sys.stdin.read() if args.path == "-" else Path(args.path).read_text(encoding="utf-8")
@@ -339,9 +410,12 @@ def main() -> int:
         return 2
 
     prose = mask_non_prose(text)
+    if video:
+        prose = mask_video_extras(prose)
     total = han_count(prose)
     if total == 0:
-        print("没有检测到汉字。", file=sys.stderr)
+        print("没有检测到汉字。" + ("模式E/F只统计口播，检查一下口播是不是都被写成了备注或附录。"
+                                   if video else ""), file=sys.stderr)
         return 2
 
     fails: list[str] = []
@@ -520,8 +594,8 @@ def main() -> int:
             )
         elif mode == "A" and distinct < 8:
             warns.append(f"不同口语词组只有 {distinct} 种，模式A建议 8 种以上。")
-        elif mode == "B" and distinct < 5:
-            warns.append(f"不同口语词组只有 {distinct} 种，模式B建议 5 种以上。")
+        elif mode in "BEF" and distinct < 5:
+            warns.append(f"不同口语词组只有 {distinct} 种，模式{mode}建议 5 种以上。")
 
     emotion_marks = len(re.findall(r"。。。|？？？", prose))
     if style and total >= 500 and emotion_marks * 1000 / total > 5:
@@ -533,7 +607,8 @@ def main() -> int:
     if style and len(lines) >= 10:
         single = sum(1 for _, _, l in lines if len(re.findall(r"[。！？!?]", l)) <= 1)
         ratio = single / len(lines)
-        if ratio >= 0.8:
+        # 口播稿一句一行很正常，只看下面的连续短促段
+        if ratio >= 0.8 and not video:
             warns.append(f"{ratio:.0%} 的段落只有一句话，可能形成统一的短段鼓点。"
                          "一句话成段要有实际停顿价值，不能连续排成口号。")
 
@@ -585,9 +660,74 @@ def main() -> int:
                      f"（{len(match.group(1))} 字）。超过 2 行的加粗几乎肯定是过度结构化。")
         break
 
+    if video:
+        for match in WECHAT_LEFTOVER.finditer(prose):
+            fails.append(f"公众号尾部残留，第 {line_number(text, match.start())} 行，"
+                         f"{match.group()}。换成B站固定尾部")
+
+        deixis = list(READING_DEIXIS.finditer(prose))
+        if deixis:
+            samples = "；".join(f"第 {line_number(text, m.start())} 行“{m.group()}”"
+                               for m in deixis[:4])
+            warns.append(f"阅读指代 {len(deixis)} 处，{samples}。"
+                         "观众看不到上文和下图，改成刚才说到、你看画面上。")
+
+        clauses = long_clauses(prose)
+        if clauses:
+            samples = "；".join(f"第 {line_number(text, m.start())} 行“{excerpt(m.group(), 30)}”"
+                               for m in clauses[:3])
+            warns.append(f"{len(clauses)} 处两个停顿之间超过 {LONG_CLAUSE} 个字，"
+                         f"念的时候没地方换气。{samples}")
+
+        parens = list(SPOKEN_PAREN.finditer(prose))
+        if parens:
+            samples = "；".join(f"第 {line_number(text, m.start())} 行“{excerpt(m.group(), 24)}”"
+                               for m in parens[:3])
+            warns.append(f"口播里有 {len(parens)} 处括号，念出来没有括号。"
+                         f"变成一句话，或者只放屏上。{samples}")
+
+        symbols = list(SPOKEN_SYMBOLS.finditer(prose))
+        if symbols:
+            lines_hit = "、".join(dict.fromkeys(str(line_number(text, m.start()))
+                                                for m in symbols[:8]))
+            warns.append(f"口播里有 {len(symbols)} 个念不出来的符号，第 {lines_hit} 行。"
+                         "改成话，或者只放屏上。")
+
+        for match in list(TIMESTAMP.finditer(prose))[:1]:
+            warns.append(f"第 {line_number(text, match.start())} 行像是时间戳。"
+                         "脚本不标时间，按成片剪辑结果再加。")
+        for match in list(TIME_PROMISE.finditer(prose))[:1]:
+            warns.append(f"第 {line_number(text, match.start())} 行有时长承诺，"
+                         f"“{match.group()}”。节奏让观众自己感受。")
+
+        intro = prose.find("我是情酱")
+        if intro < 0 or han_count(prose[:intro]) > 150:
+            warns.append("开头三句内没有找到“我是情酱”。B站口播的自我介绍放在前两三句。")
+        if "一键三连" not in prose:
+            warns.append("没有找到B站固定尾部。")
+        if not SCREEN_CUE.search(text):
+            warns.append("没有【屏幕】或【纯口播】备注。逐段告诉作者屏幕上放什么，"
+                         "不需要画面的段落标纯口播。")
+        if "屏上呈现总则" not in text:
+            warns.append("没有屏上呈现总则。脚本开头先列画面来源和段落到主画面的映射。")
+
     # ---- 篇幅
     ranges = {"A": (4000, 8000), "B": (500, 3000), "C": (50, 800)}
-    if mode in ranges:
+    if video:
+        if args.minutes:
+            low, high = (round(rate * args.minutes) for rate in SPEECH_RATE_RANGE)
+            target = f"目标 {args.minutes:g} 分钟"
+        else:
+            low, high = 1000, 5200
+            target = "没给 --minutes，按五到二十分钟的宽范围"
+        estimate = total / SPEECH_RATE
+        if total < low:
+            warns.append(f"口播 {total} 字，约 {estimate:.1f} 分钟，{target}，少于 {low} 字。"
+                         "材料不够就做短，别用重复解释撑时长。")
+        elif total > high:
+            warns.append(f"口播 {total} 字，约 {estimate:.1f} 分钟，{target}，超过 {high} 字。"
+                         "先删背景铺垫和次要案例，结论和最具体的例子留下。")
+    elif mode in ranges:
         low, high = ranges[mode]
         if total < low:
             warns.append(f"正文 {total} 字，低于模式{mode}建议下限 {low} 字。"
@@ -596,7 +736,10 @@ def main() -> int:
             warns.append(f"正文 {total} 字，高于模式{mode}建议上限 {high} 字。")
 
     # ---------------------------------------------------------------- 输出
-    print(f"模式 {mode}　汉字数 {total}")
+    if video:
+        print(f"模式 {mode}　口播汉字数 {total}　按每分钟 {SPEECH_RATE} 字约 {total / SPEECH_RATE:.1f} 分钟")
+    else:
+        print(f"模式 {mode}　汉字数 {total}")
     print(f"翻案腔 {len(hard_pivots)}（疑似变形 {len(soft_pivots)}）　"
           f"口语词组 {len(colloquial)} 处 / {distinct} 种　"
           f"情绪标点 {emotion_marks}")
